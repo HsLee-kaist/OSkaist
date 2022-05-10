@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/interrupt.h"
+#include "threads/synch.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -91,14 +92,38 @@ struct thread {
 	enum thread_status status;          /* Thread state. */
 	char name[16];                      /* Name (for debugging purposes). */
 	int priority;                       /* Priority. */
-
+	int64_t local_tick;					/* Save tick */
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
+	
+	/* For priority donation */
+	int init_priority;
+    struct lock *wait_on_lock;
+    struct list donations;
+    struct list_elem donation_elem;
 
+	/* For 4.4BSD implementation */
+	int nice;	// -20 ~ 20
+	int recent_cpu;
+
+	struct file * run_file;
+ 
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
+	struct thread* parent_p;
+	struct list child_list;
+	struct list_elem child_elem;
+
+	int exit_status;
+	struct semaphore wait_sema;
+	struct semaphore clean_sema;
+	struct semaphore fork_sema;
+
+	struct file **file_descriptor;
+	struct intr_frame parent_if;
 #endif
+
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;
@@ -136,11 +161,31 @@ void thread_yield (void);
 int thread_get_priority (void);
 void thread_set_priority (int);
 
+//priority donation functions
+void donate_priority(void);
+void remove_with_lock(struct lock *lock);
+void refresh_priority(void);
+
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 void do_iret (struct intr_frame *tf);
+
+void thread_sleep (int64_t ticks);
+void thread_wake (int64_t ticks);
+void update_minimum_tick (struct thread *th, int64_t ticks);
+int64_t get_minimum_tick (void);
+bool cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
+bool cmp_don_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
+void test_max_priority (void);
+
+// For 4.4BSD implementation
+void inc_recent_cpu (void);
+int cal_recent_cpu (int recent_cpu, int nice);
+int cal_priority (int recent_cpu, int nice);
+void recal_recent_cpu (void);
+void recal_priority (void);
 
 #endif /* threads/thread.h */

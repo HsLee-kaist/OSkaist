@@ -17,6 +17,7 @@
 #include "threads/thread.h"
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"
 #include "intrinsic.h"
 #ifdef VM
 #include "vm/vm.h"
@@ -40,7 +41,7 @@ process_init (void) {
  * Notice that THIS SHOULD BE CALLED ONCE. */
 tid_t
 process_create_initd (const char *file_name) {
-	char *fn_copy;
+	char *fn_copy, *save_ptr, *token;
 	tid_t tid;
 
 	/* Make a copy of FILE_NAME.
@@ -50,10 +51,21 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
+	/* Split file_name as process_name and arguments */
+	char *process_name = palloc_get_page(PAL_ZERO);
+	char *file_name_copy = palloc_get_page(PAL_ZERO);
+
+	strlcpy(file_name_copy, file_name, strlen(file_name)+1);
+	token = strtok_r(file_name_copy, " ", &save_ptr);
+	strlcpy(process_name, token, 16);
+
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
+	tid = thread_create (process_name, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
+	
+	palloc_free_page(process_name);
+	palloc_free_page(file_name_copy);
 	return tid;
 }
 
@@ -68,6 +80,7 @@ initd (void *f_name) {
 
 	if (process_exec (f_name) < 0)
 		PANIC("Fail to launch initd\n");
+
 	NOT_REACHED ();
 }
 
@@ -76,8 +89,14 @@ initd (void *f_name) {
 tid_t
 process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	struct thread *cur = thread_current();
+	//memcpy(&cur->parent_if, if_, sizeof(struct intr_frame));
+	tid_t ret = thread_create (name, PRI_DEFAULT, __do_fork, cur);
+	if (ret == TID_ERROR)
+		return TID_ERROR;
+
+	sema_down(&cur->fork_sema);
+	return ret;
 }
 
 #ifndef VM
@@ -92,21 +111,31 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	if (is_kernel_vaddr(va))
+		return true; // why???
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
+	if (!parent_page)
+		return false;
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
+	newpage = palloc_get_page(PAL_USER);
+	if (!newpage)
+		return false;
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	memcpy(newpage, parent_page, PGSIZE);
+	writable = is_writable(pte);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
+		return false;
 	}
 	return true;
 }
@@ -114,21 +143,23 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 
 /* A thread function that copies parent's execution context.
  * Hint) parent->tf does not hold the userland context of the process.
+			=> Because if process enters syscall, it's rbp changed to point kernel space
  *       That is, you are required to pass second argument of process_fork to
  *       this function. */
 static void
 __do_fork (void *aux) {
-	struct intr_frame if_;
 	struct thread *parent = (struct thread *) aux;
-	struct thread *current = thread_current ();
+	struct thread *current = thread_current (); // child thread
+	struct intr_frame if_;
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
+	struct intr_frame *parent_if = &parent->parent_if;
 	bool succ = true;
 
 	/* 1. Read the cpu context to local stack. */
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	if_.R.rax = 0; //set child pid to 0 <- why??
 
-	/* 2. Duplicate PT */
+	/* 2. Duplicate PT(Page Table) */
 	current->pml4 = pml4_create();
 	if (current->pml4 == NULL)
 		goto error;
@@ -139,6 +170,7 @@ __do_fork (void *aux) {
 	if (!supplemental_page_table_copy (&current->spt, &parent->spt))
 		goto error;
 #else
+	/* What is this function? */
 	if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
 		goto error;
 #endif
@@ -148,13 +180,29 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	/* == Copy file descriptor?? */
 
+	struct file** fd_parent;
+	
+	fd_parent = parent -> file_descriptor;
+	for (int i = 3; i < 128; i++){
+		if (fd_parent[i] == NULL){
+			current->file_descriptor[i] = NULL;
+			continue;
+		}
+		current->file_descriptor[i] = file_duplicate(fd_parent[i]);
+	}
+
+	//current->parent_p = parent;
+	//list_push_back(&parent->child_list, &current->child_elem);
+	sema_up(&parent->fork_sema);
 	process_init ();
-
+	
 	/* Finally, switch to the newly created process. */
 	if (succ)
 		do_iret (&if_);
 error:
+	sema_up(&parent->fork_sema);
 	thread_exit ();
 }
 
@@ -162,8 +210,13 @@ error:
  * Returns -1 on fail. */
 int
 process_exec (void *f_name) {
-	char *file_name = f_name;
+	/* There is an unrelated limit of 128 bytes on command-line arguments that the pintos utility can pass to the kernel. 
+		- according to document- */
+	char *token, *save_ptr;
+	char *args[128];
 	bool success;
+	int count = 0;
+	int word_len = 0;
 
 	/* We cannot use the intr_frame in the thread structure.
 	 * This is because when current thread rescheduled,
@@ -176,16 +229,73 @@ process_exec (void *f_name) {
 	/* We first kill the current context */
 	process_cleanup ();
 
+	/* ---------------------------------------
+	1. Parse f_name by file_name and args.
+	------------------------------------------*/
+	for (token = strtok_r (f_name, " ", &save_ptr); token != NULL; token = strtok_r (NULL, " ", &save_ptr)){
+		char *arg = (char *)malloc(sizeof(char) * 128);
+		if (arg == NULL)
+		 	return -1;
+		strlcpy(arg, token, strlen(token) + 1);
+		args[count] = arg;
+
+		word_len += (strlen(token) + 1); // consider "\0"
+		count++;
+	}
+	
 	/* And then load the binary */
-	success = load (file_name, &_if);
+	success = load (*args, &_if);
 
 	/* If load failed, quit. */
-	palloc_free_page (file_name);
 	if (!success)
 		return -1;
 
+	/* ----------------------------------------
+	2. Pass args by making argument_stack() function.
+	void argument_stack(char **args ,int count ,void **rsp);
+	------------------------------------------- */
+	uintptr_t stack = _if.rsp;
+	uintptr_t argv_t = stack;
+	
+	for (int i = count-1; i >= 0; i--){
+		stack -= (strlen(args[i])+1);
+		memcpy((char *)stack, args[i],strlen(args[i])+1);
+	}
+
+	//word-align
+	int bumper = 8 - (word_len % 8);
+
+	for (int i = 0; i < bumper; i++) {
+		stack--;
+		*(uint8_t *)stack = 0;
+	}
+
+	//one null pointer
+	stack -= sizeof(char*);
+	*(char **)stack = 0;
+
+	//pointers to words;
+	for (int i = count-1; i >= 0; i--){
+		stack -= sizeof(char *);
+		argv_t -= (strlen(args[i])+1); 
+		*(char **)stack =  argv_t;
+	}
+	for (int i = 0; i < count; i++)
+		free(args[i]);
+
+	// ret addr
+	_if.R.rsi = stack;
+	stack -= sizeof(void *);
+	*(void **) stack = 0;
+	_if.R.rdi = count;
+
+	
+	// hex_dump(stack, stack, 0x47480000 - stack, true);
+	_if.rsp = stack;
+
+	palloc_free_page (f_name);
 	/* Start switched process. */
-	do_iret (&_if);
+	do_iret (&_if); 
 	NOT_REACHED ();
 }
 
@@ -204,18 +314,78 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	return -1;
+	// first check that child_tid is valid.
+	struct list_elem* e;
+	struct thread* curr = thread_current();
+	struct thread* ch;
+	bool is_child = false;
+	int child_exit;
+
+	if (child_tid <= 0)
+		return -1;
+
+	for (e = list_begin(&curr->child_list); e != list_end(&curr->child_list); e = list_next(e)) {
+		ch = list_entry(e, struct thread, child_elem);
+		if (ch->tid == child_tid) {
+			is_child = true;
+			break;
+		}
+	}
+
+	if (!is_child)
+		return -1;
+
+	sema_down(&ch->wait_sema);
+	child_exit = ch-> exit_status;
+	list_remove(e);
+	sema_up(&ch->clean_sema);
+	return child_exit;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
 void
 process_exit (void) {
 	struct thread *curr = thread_current ();
+	struct list_elem* e;
+	struct thread *ch;
+
 	/* TODO: Your code goes here.
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
+	// struct file *run_file = curr->run_file;
+	if (curr->run_file){
+		file_allow_write(curr->run_file);
+		file_close(curr->run_file);
+	}
+	
+	// Close all opened file in file descriptor 
+	struct file **fd = curr->file_descriptor;
+	// fd += 3;
+	for (int i = 0; i < 128; i++) {
+		struct file *f = fd[i];
+		if (f == NULL)
+			continue;
+
+		file_close(f);
+		fd[i] = NULL;
+	}
+
+	/* reap child if parent is not waiting it when alive */
+	for (e = list_begin(&curr->child_list); e != list_end(&curr->child_list); e = list_next(e)) {
+		ch = list_entry(e, struct thread, child_elem);
+		if (ch->wait_sema.value > 0)
+			process_wait(ch->tid);
+	}
+
+	// sema_up when curr is child process
+	if (curr->parent_p != NULL) { //&& !list_empty(&curr->wait_sema.waiters)) {
+		sema_up(&curr->wait_sema);
+		sema_down(&curr->clean_sema);// Later think..
+	}
+
+	palloc_free_page(fd);
 	process_cleanup ();
 }
 
@@ -418,6 +588,9 @@ load (const char *file_name, struct intr_frame *if_) {
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 
 	success = true;
+	file_deny_write(file);
+	t->run_file = file;
+	return true;
 
 done:
 	/* We arrive here whether the load is successful or not. */

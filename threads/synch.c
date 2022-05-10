@@ -66,7 +66,7 @@ sema_down (struct semaphore *sema) {
 
 	old_level = intr_disable ();
 	while (sema->value == 0) {
-		list_push_back (&sema->waiters, &thread_current ()->elem);
+		list_insert_ordered (&sema->waiters, &thread_current()->elem, cmp_priority, NULL);
 		thread_block ();
 	}
 	sema->value--;
@@ -105,14 +105,21 @@ sema_try_down (struct semaphore *sema) {
 void
 sema_up (struct semaphore *sema) {
 	enum intr_level old_level;
+	struct thread *sema_thread = NULL;
 
 	ASSERT (sema != NULL);
 
 	old_level = intr_disable ();
-	if (!list_empty (&sema->waiters))
-		thread_unblock (list_entry (list_pop_front (&sema->waiters),
-					struct thread, elem));
+	if (!list_empty (&sema->waiters)){
+		list_sort (&sema->waiters, cmp_priority, NULL);
+		sema_thread = list_entry (list_pop_front (&sema->waiters),
+					struct thread, elem);
+		thread_unblock (sema_thread);
+	}
+
 	sema->value++;
+	if (sema_thread != NULL && thread_current()->priority < sema_thread->priority)
+		thread_yield();
 	intr_set_level (old_level);
 }
 
@@ -150,7 +157,7 @@ sema_test_helper (void *sema_) {
 		sema_up (&sema[1]);
 	}
 }
-
+
 /* Initializes LOCK.  A lock can be held by at most a single
    thread at any given time.  Our locks are not "recursive", that
    is, it is an error for the thread currently holding a lock to
@@ -188,8 +195,20 @@ lock_acquire (struct lock *lock) {
 	ASSERT (!intr_context ());
 	ASSERT (!lock_held_by_current_thread (lock));
 
+	if (!thread_mlfqs) {
+    	if (lock->holder != NULL) {
+			struct thread *lock_holder = lock->holder;
+  			thread_current()->wait_on_lock = lock;
+  
+  			// add thread_current to lock holder's donation list by ordering
+			list_insert_ordered(&lock_holder->donations, &thread_current()->donation_elem, cmp_don_priority, NULL);
+  			donate_priority();
+		}
+	}
+
 	sema_down (&lock->semaphore);
-	lock->holder = thread_current ();
+	thread_current()->wait_on_lock = NULL;
+	lock->holder = thread_current();
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -222,6 +241,11 @@ lock_release (struct lock *lock) {
 	ASSERT (lock != NULL);
 	ASSERT (lock_held_by_current_thread (lock));
 
+	if (!thread_mlfqs) {
+		remove_with_lock(lock);
+		refresh_priority();
+	}
+	
 	lock->holder = NULL;
 	sema_up (&lock->semaphore);
 }
@@ -235,7 +259,7 @@ lock_held_by_current_thread (const struct lock *lock) {
 
 	return lock->holder == thread_current ();
 }
-
+
 /* One semaphore in a list. */
 struct semaphore_elem {
 	struct list_elem elem;              /* List element. */
@@ -282,7 +306,7 @@ cond_wait (struct condition *cond, struct lock *lock) {
 	ASSERT (lock_held_by_current_thread (lock));
 
 	sema_init (&waiter.semaphore, 0);
-	list_push_back (&cond->waiters, &waiter.elem);
+	list_insert_ordered (&cond->waiters, &waiter.elem, cmp_sem_priority, NULL);
 	lock_release (lock);
 	sema_down (&waiter.semaphore);
 	lock_acquire (lock);
@@ -302,9 +326,11 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED) {
 	ASSERT (!intr_context ());
 	ASSERT (lock_held_by_current_thread (lock));
 
-	if (!list_empty (&cond->waiters))
+	if (!list_empty (&cond->waiters)) {
+		list_sort (&cond->waiters,cmp_sem_priority, NULL);
 		sema_up (&list_entry (list_pop_front (&cond->waiters),
 					struct semaphore_elem, elem)->semaphore);
+	}
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -320,4 +346,23 @@ cond_broadcast (struct condition *cond, struct lock *lock) {
 
 	while (!list_empty (&cond->waiters))
 		cond_signal (cond, lock);
+}
+
+bool cmp_sem_priority (const struct list_elem *a, const struct 
+		list_elem *b, void *aux UNUSED){
+			struct semaphore_elem *sa = list_entry(a, struct semaphore_elem, elem);
+			struct semaphore_elem *sb = list_entry(b, struct semaphore_elem, elem);
+
+			struct list *la = &(sa->semaphore.waiters);
+			struct list *lb = &(sb->semaphore.waiters);
+
+			struct thread *ta = list_entry(list_begin(la), struct thread, elem);
+			struct thread *tb = list_entry(list_begin(lb), struct thread, elem);
+
+			if (ta->priority > tb->priority){
+				return true;
+			}
+			else {
+				return false;
+			}
 }
