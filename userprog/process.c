@@ -46,7 +46,7 @@ process_create_initd (const char *file_name) {
 
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
-	fn_copy = palloc_get_page (0);
+	fn_copy = palloc_get_page (PAL_ZERO);
 	if (fn_copy == NULL)
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
@@ -61,6 +61,7 @@ process_create_initd (const char *file_name) {
 
 	/* Create a new thread to execute FILE_NAME. */
 	tid = thread_create (process_name, PRI_DEFAULT, initd, fn_copy);
+	// tid = thread_create(file_name, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	
@@ -76,7 +77,7 @@ initd (void *f_name) {
 	supplemental_page_table_init (&thread_current ()->spt);
 #endif
 
-	process_init ();
+	// process_init ();
 
 	if (process_exec (f_name) < 0)
 		PANIC("Fail to launch initd\n");
@@ -193,8 +194,8 @@ __do_fork (void *aux) {
 		current->file_descriptor[i] = file_duplicate(fd_parent[i]);
 	}
 
-	//current->parent_p = parent;
-	//list_push_back(&parent->child_list, &current->child_elem);
+	// current->parent_p = parent;
+	// list_push_back(&parent->child_list, &current->child_elem);
 	sema_up(&parent->fork_sema);
 	process_init ();
 	
@@ -378,6 +379,9 @@ process_exit (void) {
 		if (ch->wait_sema.value > 0)
 			process_wait(ch->tid);
 	}
+	
+	palloc_free_page(fd);
+	process_cleanup ();
 
 	// sema_up when curr is child process
 	if (curr->parent_p != NULL) { //&& !list_empty(&curr->wait_sema.waiters)) {
@@ -385,8 +389,7 @@ process_exit (void) {
 		sema_down(&curr->clean_sema);// Later think..
 	}
 
-	palloc_free_page(fd);
-	process_cleanup ();
+	
 }
 
 /* Free the current process's resources. */
@@ -594,7 +597,7 @@ load (const char *file_name, struct intr_frame *if_) {
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	// file_close (file);
 	return success;
 }
 

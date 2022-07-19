@@ -111,6 +111,17 @@ struct thread {
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
+#endif
+
+#ifdef VM
+	/* Table for whole virtual memory owned by thread. */
+	struct supplemental_page_table spt;
+#endif
+
+	/* Owned by thread.c. */
+	struct intr_frame tf;               /* Information for switching */
+	unsigned magic;                     /* Detects stack overflow. */
+
 	struct thread* parent_p;
 	struct list child_list;
 	struct list_elem child_elem;
@@ -122,16 +133,6 @@ struct thread {
 
 	struct file **file_descriptor;
 	struct intr_frame parent_if;
-#endif
-
-#ifdef VM
-	/* Table for whole virtual memory owned by thread. */
-	struct supplemental_page_table spt;
-#endif
-
-	/* Owned by thread.c. */
-	struct intr_frame tf;               /* Information for switching */
-	unsigned magic;                     /* Detects stack overflow. */
 };
 
 /* If false (default), use round-robin scheduler.

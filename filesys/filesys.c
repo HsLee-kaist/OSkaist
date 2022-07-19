@@ -22,7 +22,6 @@ filesys_init (bool format) {
 		PANIC ("hd0:1 (hdb) not present, file system initialization failed");
 
 	inode_init ();
-
 #ifdef EFILESYS
 	fat_init ();
 
@@ -33,10 +32,8 @@ filesys_init (bool format) {
 #else
 	/* Original FS */
 	free_map_init ();
-
 	if (format)
 		do_format ();
-
 	free_map_open ();
 #endif
 }
@@ -106,15 +103,17 @@ filesys_remove (const char *name) {
 static void
 do_format (void) {
 	printf ("Formatting file system...");
-
 #ifdef EFILESYS
 	/* Create FAT and save it to the disk. */
 	fat_create ();
 	fat_close ();
 #else
+	printf("jebal...");
 	free_map_create ();
+	printf("zom...");
 	if (!dir_create (ROOT_DIR_SECTOR, 16))
 		PANIC ("root directory creation failed");
+	printf("sibal...");
 	free_map_close ();
 #endif
 

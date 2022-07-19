@@ -682,13 +682,13 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->nice = 0;
 	t->recent_cpu = 0;
 	t->run_file = NULL;
-
-#ifdef USERPROG
-	t->exit_status = 0;
 	list_init(&t->child_list);
 	sema_init(&t->wait_sema, 0);
 	sema_init(&t->clean_sema, 0);
 	sema_init(&t->fork_sema, 0);
+#ifdef USERPROG
+	t->exit_status = 0;
+
 #endif
 }
 
